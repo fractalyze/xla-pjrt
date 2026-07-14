@@ -1,0 +1,11 @@
+[package]
+name = "xla-pjrt"
+version = "0.1.0"
+edition = "2021"
+description = "Minimal PJRT C API FFI for driving the xla GPU (jax-cuda12) plugin. Curve- and ark-agnostic: deals only in raw bytes + zk_dtypes buffer-type tags."
+
+[dependencies]
+libloading = "0.8"
+
+[build-dependencies]
+bindgen = "0.69"
