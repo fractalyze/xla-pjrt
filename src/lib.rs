@@ -148,7 +148,7 @@ impl Client {
         a.dims = dims.as_ptr();
         a.num_dims = dims.len();
         a.host_buffer_semantics =
-            sys::PJRT_HostBufferSemantics_PJRT_HostBufferSemantics_kImmutableUntilTransferCompletes;
+            sys::PJRT_HostBufferSemantics_kImmutableUntilTransferCompletes;
         a.device = device;
         check(self.api, (*self.api).PJRT_Client_BufferFromHostBuffer.unwrap()(&mut a), "BufferFromHostBuffer");
         // Wait until the runtime has finished reading `data` so it is safe to drop.

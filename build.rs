@@ -22,6 +22,9 @@ fn main() {
         .allowlist_function("GetPjrtApi")
         .allowlist_var("PJRT_.*")
         .default_enum_style(bindgen::EnumVariation::Consts)
+        // C enum variants already carry their type prefix (PJRT_Buffer_Type_BN254_SF),
+        // so don't double it — consumers name the header-faithful tag, not a bindgen artifact.
+        .prepend_enum_name(false)
         .derive_default(true)
         .generate()
         .expect("bindgen failed")
