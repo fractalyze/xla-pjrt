@@ -28,19 +28,6 @@ pub struct Pjrt {
     pub api: *const sys::PJRT_Api,
 }
 
-// Custom buffer element types (PJRT_Buffer_Type, inlined in pjrt_c_api.h). The
-// element type carries the per-element byte size (sf=32, g1=64, g2=128), so
-// buffer `dims` are logical element counts, not byte shapes.
-pub const BN254_SF: sys::PJRT_Buffer_Type = sys::PJRT_Buffer_Type_PJRT_Buffer_Type_BN254_SF;
-pub const BN254_SF_MONT: sys::PJRT_Buffer_Type = sys::PJRT_Buffer_Type_PJRT_Buffer_Type_BN254_SF_MONT;
-pub const BN254_G1_AFFINE: sys::PJRT_Buffer_Type = sys::PJRT_Buffer_Type_PJRT_Buffer_Type_BN254_G1_AFFINE;
-pub const BN254_G2_AFFINE: sys::PJRT_Buffer_Type = sys::PJRT_Buffer_Type_PJRT_Buffer_Type_BN254_G2_AFFINE;
-
-/// On-the-wire byte sizes of the zk_dtypes element types (32-byte LE limbs).
-pub const SF_BYTES: usize = 32;
-pub const G1_BYTES: usize = 64;
-pub const G2_BYTES: usize = 128;
-
 /// Panic with the plugin's message if `err` is non-null.
 unsafe fn check(api: *const sys::PJRT_Api, err: *mut sys::PJRT_Error, ctx: &str) {
     if err.is_null() {
@@ -244,23 +231,10 @@ pub unsafe fn run_bytecode(code: &[u8], inputs: &Inputs, num_outputs: usize) -> 
     run_loaded(&c, exe, inputs, num_outputs)
 }
 
-/// Slice 0: single `lax.msm` — scalars (BN254_SF, `[n]`), G1 points
-/// (BN254_G1_AFFINE, `[n]`) -> one G1 point (64 bytes).
-pub unsafe fn run_msm(code: &[u8], scalars: &[u8], points: &[u8]) -> Vec<u8> {
-    let ns = (scalars.len() / SF_BYTES) as i64;
-    let np = (points.len() / G1_BYTES) as i64;
-    let mut r = run_bytecode(
-        code,
-        &[(scalars, vec![ns], BN254_SF), (points, vec![np], BN254_G1_AFFINE)],
-        1,
-    );
-    r.pop().unwrap()
-}
-
 /// A persistent plugin + GPU client. Creating a second client in one process
 /// aborts (the plugin throws a C++ exception Rust can't catch), so a caller that
-/// runs several executables — e.g. the five MSMs of one Groth16 proof — must
-/// reuse one `Session` instead of the one-shot free functions above.
+/// runs several executables in one process must reuse one `Session` instead of
+/// the one-shot [`run_bytecode`] free function.
 pub struct Session {
     _pjrt: Pjrt, // keeps the .so resident; `client.api` points into it
     client: Client,
@@ -291,31 +265,6 @@ impl Session {
     /// Run a pre-compiled executable.
     pub unsafe fn run(&self, exe: &Executable, inputs: &Inputs, num_outputs: usize) -> Vec<Vec<u8>> {
         run_loaded(&self.client, exe.0, inputs, num_outputs)
-    }
-
-    /// Single G1 `lax.msm` against a pre-compiled executable (see [`run_msm`]).
-    pub unsafe fn run_msm(&self, exe: &Executable, scalars: &[u8], points: &[u8]) -> Vec<u8> {
-        let ns = (scalars.len() / SF_BYTES) as i64;
-        let np = (points.len() / G1_BYTES) as i64;
-        let mut r = self.run(
-            exe,
-            &[(scalars, vec![ns], BN254_SF), (points, vec![np], BN254_G1_AFFINE)],
-            1,
-        );
-        r.pop().unwrap()
-    }
-
-    /// Single G2 `lax.msm` against a pre-compiled executable (BN254_G2_AFFINE
-    /// points -> one G2 point, 128 bytes).
-    pub unsafe fn run_msm_g2(&self, exe: &Executable, scalars: &[u8], points: &[u8]) -> Vec<u8> {
-        let ns = (scalars.len() / SF_BYTES) as i64;
-        let np = (points.len() / G2_BYTES) as i64;
-        let mut r = self.run(
-            exe,
-            &[(scalars, vec![ns], BN254_SF), (points, vec![np], BN254_G2_AFFINE)],
-            1,
-        );
-        r.pop().unwrap()
     }
 
     /// Upload a host array to a persistent device buffer (reuse across runs).

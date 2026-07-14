@@ -7,9 +7,9 @@ buffer-type tags, so a caller assembles its own proofs on top.
 
 It drives an AOT-lowered StableHLO module on the GPU: load plugin -> create
 client -> compile -> upload host buffers -> execute -> copy outputs back. A
-`Session` keeps the plugin + client resident so several executables (e.g. the
-five MSMs of one Groth16 proof) share one client, and input buffers (e.g. a
-proving key) can be uploaded once and reused across runs.
+`Session` keeps the plugin + client resident so several executables share one
+client, and input buffers (e.g. a proving key) can be uploaded once and reused
+across runs.
 
 ## Use
 
