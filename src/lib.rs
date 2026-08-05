@@ -353,6 +353,16 @@ impl Session {
             .collect()
     }
 
+    /// Copy one buffer to the host.
+    ///
+    /// The companion to [`run_buffers_to_device`](Self::run_buffers_to_device):
+    /// keeping an execution's outputs on the device is only useful if the few
+    /// the host *does* need — a commitment among intermediates it never reads —
+    /// can be fetched without dragging the rest back.
+    pub unsafe fn buffer_to_host(&self, buffer: &Buffer) -> Vec<u8> {
+        self.client.to_host(buffer.0)
+    }
+
     /// Release a buffer's device memory.
     ///
     /// Takes ownership so a freed buffer cannot be executed against. `Buffer`
