@@ -76,6 +76,29 @@ fn device_output_feeds_the_next_execution() {
 
 #[test]
 #[ignore = "needs the xla GPU plugin (see the module docs)"]
+fn one_output_reads_back_without_the_others() {
+    // The case that motivates it: keep everything resident, fetch the one
+    // value the host actually needs.
+    unsafe {
+        let session = Session::new();
+        let exe = session.compile(DOUBLE.as_bytes());
+        let input = session.input_buffer(as_bytes(&[1.0, 2.0, 3.0, 4.0]), &[4], F32);
+
+        let mut outs = session.run_buffers_to_device(&exe, &[&input], 1);
+        let out = outs.pop().unwrap();
+        assert_eq!(as_f32(&session.buffer_to_host(&out)), vec![2.0, 4.0, 6.0, 8.0]);
+
+        // Still usable afterwards: reading is a copy, not a move.
+        let again = session.run_buffers(&exe, &[&out], 1);
+        assert_eq!(as_f32(&again[0]), vec![4.0, 8.0, 12.0, 16.0]);
+
+        session.free_buffer(out);
+        session.free_buffer(input);
+    }
+}
+
+#[test]
+#[ignore = "needs the xla GPU plugin (see the module docs)"]
 fn repeated_runs_do_not_exhaust_device_memory() {
     // `run_buffers_timed` used to leak every output: it copied each to host
     // and dropped the pointer. A leak is invisible in one call and fatal in a
