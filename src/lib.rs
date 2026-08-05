@@ -185,6 +185,13 @@ impl Client {
         out_inner
     }
 
+    unsafe fn destroy_buffer(&self, buf: *mut sys::PJRT_Buffer) {
+        let mut a: sys::PJRT_Buffer_Destroy_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_Buffer_Destroy_Args>();
+        a.buffer = buf;
+        check(self.api, (*self.api).PJRT_Buffer_Destroy.unwrap()(&mut a), "Buffer_Destroy");
+    }
+
     unsafe fn to_host(&self, buf: *mut sys::PJRT_Buffer) -> Vec<u8> {
         // First pass: query required size (dst = null).
         let mut q: sys::PJRT_Buffer_ToHostBuffer_Args = zeroed();
@@ -244,8 +251,14 @@ pub struct Session {
 /// across runs to avoid recompiling the same module on every call.
 pub struct Executable(*mut sys::PJRT_LoadedExecutable);
 
-/// A device-resident input buffer. Upload once and reuse across executions to
-/// avoid re-transferring a constant input (e.g. a proving key).
+/// Device-resident data: an uploaded input, or an output kept on the device.
+///
+/// Upload once and reuse across executions to avoid re-transferring a constant
+/// input (e.g. a proving key), or carry one stage's output into the next
+/// without a round trip (see [`Session::run_buffers_to_device`]).
+///
+/// A buffer from [`Session::input_buffer`] or `run_buffers_to_device` owns
+/// device memory until passed to [`Session::free_buffer`].
 pub struct Buffer(*mut sys::PJRT_Buffer);
 
 impl Session {
@@ -308,6 +321,46 @@ impl Session {
         let t = std::time::Instant::now();
         let host = outs.iter().map(|&b| self.client.to_host(b)).collect();
         let readback = t.elapsed();
+        // The outputs have been copied out; without this their device memory
+        // lives until the plugin unloads, which a prover exhausts.
+        outs.iter().for_each(|&b| self.client.destroy_buffer(b));
         (host, dispatch, readback)
+    }
+
+    /// Like [`run_buffers`], but leaves the outputs on the device.
+    ///
+    /// The other `run_*` methods copy every output to host, which is the right
+    /// default for a result the caller is about to read. It is the wrong one
+    /// for an intermediate: a pipeline whose stages are separate executables —
+    /// because a host-driven protocol interleaves its own work between them —
+    /// otherwise pays a round trip per stage boundary for data neither side
+    /// looks at.
+    ///
+    /// Unlike the copying variants, the returned buffers own device memory:
+    /// pass each to [`free_buffer`](Self::free_buffer) when done, or the
+    /// allocation lives until the plugin unloads.
+    pub unsafe fn run_buffers_to_device(
+        &self,
+        exe: &Executable,
+        inputs: &[&Buffer],
+        num_outputs: usize,
+    ) -> Vec<Buffer> {
+        let bufs: Vec<*mut sys::PJRT_Buffer> = inputs.iter().map(|b| b.0).collect();
+        self.client
+            .execute(exe.0, &bufs, num_outputs)
+            .into_iter()
+            .map(Buffer)
+            .collect()
+    }
+
+    /// Release a buffer's device memory.
+    ///
+    /// Takes ownership so a freed buffer cannot be executed against. `Buffer`
+    /// does not free on drop: it holds only the PJRT pointer, and the API
+    /// handle needed to release it belongs to this `Session` — a `Drop` impl
+    /// would have to reach a pointer into the plugin that may already have
+    /// unloaded.
+    pub unsafe fn free_buffer(&self, buffer: Buffer) {
+        self.client.destroy_buffer(buffer.0);
     }
 }
