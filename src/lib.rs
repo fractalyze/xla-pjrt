@@ -73,16 +73,25 @@ impl Pjrt {
     unsafe fn create_client(&self, options: &SessionOptions) -> Client {
         // Options ride as PJRT named values; `preallocate` is the GPU
         // plugin's allocator switch (bool).
-        let key = b"preallocate";
         let mut named: Vec<sys::PJRT_NamedValue> = Vec::new();
-        if let Some(preallocate) = options.preallocate {
+        let mut named_value = |name: &'static [u8]| {
             let mut nv: sys::PJRT_NamedValue = zeroed();
             nv.struct_size = size_of::<sys::PJRT_NamedValue>();
-            nv.name = key.as_ptr() as *const c_char;
-            nv.name_size = key.len();
+            nv.name = name.as_ptr() as *const c_char;
+            nv.name_size = name.len();
+            nv.value_size = 1;
+            nv
+        };
+        if let Some(preallocate) = options.preallocate {
+            let mut nv = named_value(b"preallocate");
             nv.type_ = sys::PJRT_NamedValue_kBool;
             nv.__bindgen_anon_1.bool_value = preallocate;
-            nv.value_size = 1;
+            named.push(nv);
+        }
+        if let Some(fraction) = options.memory_fraction {
+            let mut nv = named_value(b"memory_fraction");
+            nv.type_ = sys::PJRT_NamedValue_kFloat;
+            nv.__bindgen_anon_1.float_value = fraction;
             named.push(nv);
         }
         let mut a: sys::PJRT_Client_Create_Args = zeroed();
@@ -117,9 +126,15 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
 /// the card up front — what lets several `Session`s (each its own allocator
 /// and stream) coexist in one process alongside other CUDA users. `None`
 /// leaves the plugin's default (preallocate most of the card, one client).
+///
+/// `memory_fraction` is the share of the card the client's allocator may
+/// take (the plugin's default is 0.75); with `preallocate: Some(true)` it
+/// is claimed at creation, which is how a client reserves memory ahead of
+/// other CUDA users that size themselves from what is free.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SessionOptions {
     pub preallocate: Option<bool>,
+    pub memory_fraction: Option<f32>,
 }
 
 pub struct Client {
