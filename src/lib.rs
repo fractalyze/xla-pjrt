@@ -70,12 +70,56 @@ impl Pjrt {
         check(self.api, (*self.api).PJRT_Plugin_Initialize.unwrap()(&mut a), "Plugin_Initialize");
     }
 
-    unsafe fn create_client(&self) -> Client {
+    unsafe fn create_client(&self, options: &SessionOptions) -> Client {
+        // Options ride as PJRT named values; `preallocate` is the GPU
+        // plugin's allocator switch (bool).
+        let key = b"preallocate";
+        let mut named: Vec<sys::PJRT_NamedValue> = Vec::new();
+        if let Some(preallocate) = options.preallocate {
+            let mut nv: sys::PJRT_NamedValue = zeroed();
+            nv.struct_size = size_of::<sys::PJRT_NamedValue>();
+            nv.name = key.as_ptr() as *const c_char;
+            nv.name_size = key.len();
+            nv.type_ = sys::PJRT_NamedValue_kBool;
+            nv.__bindgen_anon_1.bool_value = preallocate;
+            nv.value_size = 1;
+            named.push(nv);
+        }
         let mut a: sys::PJRT_Client_Create_Args = zeroed();
         a.struct_size = size_of::<sys::PJRT_Client_Create_Args>();
+        a.create_options = named.as_ptr();
+        a.num_options = named.len();
         check(self.api, (*self.api).PJRT_Client_Create.unwrap()(&mut a), "Client_Create");
         Client { api: self.api, client: a.client }
     }
+}
+
+// The plugin is process-global: PJRT initializes once and keeps threads
+// alive past any client, so every `Session` shares one loaded plugin.
+struct SharedPjrt(Pjrt);
+unsafe impl Send for SharedPjrt {}
+unsafe impl Sync for SharedPjrt {}
+static PJRT: std::sync::OnceLock<SharedPjrt> = std::sync::OnceLock::new();
+
+unsafe fn shared_pjrt() -> &'static Pjrt {
+    &PJRT
+        .get_or_init(|| {
+            let p = Pjrt::load();
+            p.plugin_initialize();
+            SharedPjrt(p)
+        })
+        .0
+}
+
+/// Client creation options.
+///
+/// `preallocate: Some(false)` keeps the GPU plugin's allocator from claiming
+/// the card up front — what lets several `Session`s (each its own allocator
+/// and stream) coexist in one process alongside other CUDA users. `None`
+/// leaves the plugin's default (preallocate most of the card, one client).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SessionOptions {
+    pub preallocate: Option<bool>,
 }
 
 pub struct Client {
@@ -231,21 +275,28 @@ unsafe fn run_loaded(
 
 /// Compile MLIR bytecode and run it. Returns one byte vec per output.
 pub unsafe fn run_bytecode(code: &[u8], inputs: &Inputs, num_outputs: usize) -> Vec<Vec<u8>> {
-    let p = Pjrt::load();
-    p.plugin_initialize();
-    let c = p.create_client();
+    let c = shared_pjrt().create_client(&SessionOptions::default());
     let exe = c.compile(code);
     run_loaded(&c, exe, inputs, num_outputs)
 }
 
-/// A persistent plugin + GPU client. Creating a second client in one process
-/// aborts (the plugin throws a C++ exception Rust can't catch), so a caller that
-/// runs several executables in one process must reuse one `Session` instead of
-/// the one-shot [`run_bytecode`] free function.
+/// A persistent GPU client over the process-global plugin. With the plugin's
+/// default allocator a second client in one process aborts (it throws a C++
+/// exception Rust can't catch), so a caller that runs several executables
+/// must reuse one `Session`; with `SessionOptions { preallocate: Some(false) }`
+/// several sessions coexist, each with its own allocator and stream.
 pub struct Session {
-    _pjrt: Pjrt, // keeps the .so resident; `client.api` points into it
     client: Client,
 }
+
+// PJRT clients, executables and buffers are thread-safe handles; the
+// pointers they wrap belong to the plugin, which outlives every session.
+unsafe impl Send for Session {}
+unsafe impl Sync for Session {}
+unsafe impl Send for Executable {}
+unsafe impl Sync for Executable {}
+unsafe impl Send for Buffer {}
+unsafe impl Sync for Buffer {}
 
 /// A compiled executable bound to a [`Session`]'s client. Compile once and reuse
 /// across runs to avoid recompiling the same module on every call.
@@ -262,12 +313,24 @@ pub struct Executable(*mut sys::PJRT_LoadedExecutable);
 pub struct Buffer(*mut sys::PJRT_Buffer);
 
 impl Session {
-    /// Load the plugin and create the single client.
+    /// Load the plugin (once per process) and create a client with the
+    /// plugin's default options.
     pub unsafe fn new() -> Self {
-        let pjrt = Pjrt::load();
-        pjrt.plugin_initialize();
-        let client = pjrt.create_client();
-        Session { _pjrt: pjrt, client }
+        Self::with_options(SessionOptions::default())
+    }
+
+    /// Load the plugin (once per process) and create a client with `options`.
+    pub unsafe fn with_options(options: SessionOptions) -> Self {
+        let client = shared_pjrt().create_client(&options);
+        Session { client }
+    }
+
+    /// Release a compiled executable's device state.
+    pub unsafe fn free_executable(&self, exe: Executable) {
+        let mut d: sys::PJRT_LoadedExecutable_Destroy_Args = zeroed();
+        d.struct_size = size_of::<sys::PJRT_LoadedExecutable_Destroy_Args>();
+        d.executable = exe.0;
+        (*self.client.api).PJRT_LoadedExecutable_Destroy.unwrap()(&mut d);
     }
 
     /// Compile MLIR bytecode once on the persistent client.
