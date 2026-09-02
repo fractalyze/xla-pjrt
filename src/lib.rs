@@ -340,6 +340,43 @@ impl Session {
         Session { client }
     }
 
+    /// The executable's serialized form — what `deserialize_and_load` turns
+    /// back into a loaded executable without recompiling. Plugin-version
+    /// specific: a cache keyed on it must be dropped with the plugin.
+    pub unsafe fn serialize(&self, exe: &Executable) -> Vec<u8> {
+        let api = self.client.api;
+        let mut g: sys::PJRT_LoadedExecutable_GetExecutable_Args = zeroed();
+        g.struct_size = size_of::<sys::PJRT_LoadedExecutable_GetExecutable_Args>();
+        g.loaded_executable = exe.0;
+        check(api, (*api).PJRT_LoadedExecutable_GetExecutable.unwrap()(&mut g), "GetExecutable");
+        let mut a: sys::PJRT_Executable_Serialize_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_Executable_Serialize_Args>();
+        a.executable = g.executable;
+        check(api, (*api).PJRT_Executable_Serialize.unwrap()(&mut a), "Executable_Serialize");
+        let bytes =
+            std::slice::from_raw_parts(a.serialized_bytes as *const u8, a.serialized_bytes_size).to_vec();
+        if let Some(deleter) = a.serialized_executable_deleter {
+            deleter(a.serialized_executable);
+        }
+        let mut d: sys::PJRT_Executable_Destroy_Args = zeroed();
+        d.struct_size = size_of::<sys::PJRT_Executable_Destroy_Args>();
+        d.executable = g.executable;
+        (*api).PJRT_Executable_Destroy.unwrap()(&mut d);
+        bytes
+    }
+
+    /// Load an executable `serialize` produced on this plugin version.
+    pub unsafe fn deserialize_and_load(&self, bytes: &[u8]) -> Executable {
+        let api = self.client.api;
+        let mut a: sys::PJRT_Executable_DeserializeAndLoad_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_Executable_DeserializeAndLoad_Args>();
+        a.client = self.client.client;
+        a.serialized_executable = bytes.as_ptr() as *const c_char;
+        a.serialized_executable_size = bytes.len();
+        check(api, (*api).PJRT_Executable_DeserializeAndLoad.unwrap()(&mut a), "Executable_DeserializeAndLoad");
+        Executable(a.loaded_executable)
+    }
+
     /// Release a compiled executable's device state.
     pub unsafe fn free_executable(&self, exe: Executable) {
         let mut d: sys::PJRT_LoadedExecutable_Destroy_Args = zeroed();
