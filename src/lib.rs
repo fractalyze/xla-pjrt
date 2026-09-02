@@ -74,7 +74,7 @@ impl Pjrt {
         // Options ride as PJRT named values; `preallocate` is the GPU
         // plugin's allocator switch (bool).
         let mut named: Vec<sys::PJRT_NamedValue> = Vec::new();
-        let mut named_value = |name: &'static [u8]| {
+        let named_value = |name: &'static [u8]| {
             let mut nv: sys::PJRT_NamedValue = zeroed();
             nv.struct_size = size_of::<sys::PJRT_NamedValue>();
             nv.name = name.as_ptr() as *const c_char;
