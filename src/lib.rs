@@ -94,6 +94,12 @@ impl Pjrt {
             nv.__bindgen_anon_1.float_value = fraction;
             named.push(nv);
         }
+        if let Some(eager) = options.eager_load_executable_modules {
+            let mut nv = named_value(b"eager_load_executable_modules");
+            nv.type_ = sys::PJRT_NamedValue_kBool;
+            nv.__bindgen_anon_1.bool_value = eager;
+            named.push(nv);
+        }
         let mut a: sys::PJRT_Client_Create_Args = zeroed();
         a.struct_size = size_of::<sys::PJRT_Client_Create_Args>();
         a.create_options = named.as_ptr();
@@ -131,10 +137,19 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
 /// take (the plugin's default is 0.75); with `preallocate: Some(true)` it
 /// is claimed at creation, which is how a client reserves memory ahead of
 /// other CUDA users that size themselves from what is free.
+///
+/// `eager_load_executable_modules: Some(true)` makes the plugin load a
+/// deserialized executable's modules into the CUDA context inside
+/// [`Session::deserialize_and_load`] instead of on its first execution. A
+/// caller that loads many executables up front and runs each once otherwise
+/// pays every module load on its critical path. The plugin must carry the
+/// option (fractalyze/xla#664); an older one rejects the unknown key and
+/// client creation fails, so leave it `None` against those.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SessionOptions {
     pub preallocate: Option<bool>,
     pub memory_fraction: Option<f32>,
+    pub eager_load_executable_modules: Option<bool>,
 }
 
 pub struct Client {
