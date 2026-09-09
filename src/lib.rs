@@ -395,6 +395,43 @@ impl Session {
         run_loaded(&self.client, exe.0, inputs, num_outputs)
     }
 
+    /// Allocate one device buffer per `(dims, elem_type)` now, for
+    /// [`Staging::transfer`] to fill later.
+    ///
+    /// The allocation is what happens here, and on a GPU client that is the
+    /// point: see [`Staging`]. Call it before the work the transfers should
+    /// overlap is enqueued.
+    pub unsafe fn stage(&self, shapes: &[(&[i64], sys::PJRT_Buffer_Type)]) -> Staging {
+        let api = self.client.api;
+        let mut m: sys::PJRT_Device_DefaultMemory_Args = zeroed();
+        m.struct_size = size_of::<sys::PJRT_Device_DefaultMemory_Args>();
+        m.device = self.client.first_device();
+        check(api, (*api).PJRT_Device_DefaultMemory.unwrap()(&mut m), "Device_DefaultMemory");
+        let specs: Vec<sys::PJRT_ShapeSpec> = shapes
+            .iter()
+            .map(|(dims, elem_type)| {
+                let mut s: sys::PJRT_ShapeSpec = zeroed();
+                s.struct_size = size_of::<sys::PJRT_ShapeSpec>();
+                s.dims = dims.as_ptr();
+                s.num_dims = dims.len();
+                s.element_type = *elem_type;
+                s
+            })
+            .collect();
+        let mut a: sys::PJRT_Client_CreateBuffersForAsyncHostToDevice_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_Client_CreateBuffersForAsyncHostToDevice_Args>();
+        a.client = self.client.client;
+        a.shape_specs = specs.as_ptr() as *mut sys::PJRT_ShapeSpec;
+        a.num_shape_specs = specs.len();
+        a.memory = m.memory;
+        check(
+            api,
+            (*api).PJRT_Client_CreateBuffersForAsyncHostToDevice.unwrap()(&mut a),
+            "Client_CreateBuffersForAsyncHostToDevice",
+        );
+        Staging { api, manager: a.transfer_manager }
+    }
+
     /// Upload a host array to a persistent device buffer (reuse across runs).
     pub unsafe fn input_buffer(
         &self,
@@ -488,4 +525,135 @@ impl Session {
     pub unsafe fn free_buffer(&self, buffer: Buffer) {
         self.client.destroy_buffer(buffer.0);
     }
+}
+
+/// Device buffers allocated now and filled later.
+///
+/// [`Session::input_buffer`] allocates and transfers in one call, and on a
+/// GPU client that costs the transfer any chance of running beside the
+/// client's own kernels. XLA's GPU allocation model is
+/// `kComputeSynchronized`: a buffer the allocator returns at time t may
+/// only be written once the compute stream has drained everything enqueued
+/// before t, which PJRT enforces by taking a compute-stream sync point when
+/// it allocates and making the host-to-device stream wait on it. A buffer
+/// allocated while a computation is in flight therefore cannot be written
+/// until that computation finishes.
+///
+/// Allocating the whole set up front and transferring into it afterwards
+/// moves that sync point earlier than the work it would otherwise wait for,
+/// which is what lets an upload overlap kernels.
+pub struct Staging {
+    api: *const sys::PJRT_Api,
+    manager: *mut sys::PJRT_AsyncHostToDeviceTransferManager,
+}
+
+/// A transfer that has been enqueued and not waited for.
+///
+/// The runtime reads the host data asynchronously, so it must stay alive
+/// and unmodified until [`Transfer::wait`] returns. Dropping one without
+/// waiting destroys the event and gives up that guarantee.
+#[must_use = "the host data may not be dropped until the transfer completes"]
+pub struct Transfer {
+    api: *const sys::PJRT_Api,
+    event: *mut sys::PJRT_Event,
+}
+
+impl Transfer {
+    /// Block until the runtime has finished reading the host data.
+    pub unsafe fn wait(self) {
+        let api = self.api;
+        let event = self.event;
+        std::mem::forget(self);
+        Client { api, client: ptr::null_mut() }.await_event(event);
+    }
+}
+
+impl Drop for Transfer {
+    fn drop(&mut self) {
+        unsafe {
+            let mut d: sys::PJRT_Event_Destroy_Args = zeroed();
+            d.struct_size = size_of::<sys::PJRT_Event_Destroy_Args>();
+            d.event = self.event;
+            (*self.api).PJRT_Event_Destroy.unwrap()(&mut d);
+        }
+    }
+}
+
+impl Staging {
+    /// Copy `data` into buffer `index` without waiting for the transfer.
+    ///
+    /// Each buffer takes exactly one transfer; a second on the same index
+    /// is an error from the runtime.
+    pub unsafe fn transfer(&self, index: usize, data: &[u8]) -> Transfer {
+        let mut a: sys::PJRT_AsyncHostToDeviceTransferManager_TransferData_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_AsyncHostToDeviceTransferManager_TransferData_Args>();
+        a.transfer_manager = self.manager;
+        a.buffer_index = index as i32;
+        a.data = data.as_ptr() as *const c_void;
+        a.offset = 0;
+        a.transfer_size = data.len() as i64;
+        a.is_last_transfer = true;
+        check(
+            self.api,
+            (*self.api).PJRT_AsyncHostToDeviceTransferManager_TransferData.unwrap()(&mut a),
+            "AsyncHostToDeviceTransferManager_TransferData",
+        );
+        Transfer { api: self.api, event: a.done_with_h2d_transfer }
+    }
+
+    /// Take buffer `index` out of the manager. The buffer owns device
+    /// memory until passed to [`Session::free_buffer`], and an execution
+    /// that consumes it waits for its transfer on its own.
+    pub unsafe fn retrieve(&self, index: usize) -> Buffer {
+        let mut a: sys::PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer_Args = zeroed();
+        a.struct_size =
+            size_of::<sys::PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer_Args>();
+        a.transfer_manager = self.manager;
+        a.buffer_index = index as i32;
+        check(
+            self.api,
+            (*self.api).PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer.unwrap()(&mut a),
+            "AsyncHostToDeviceTransferManager_RetrieveBuffer",
+        );
+        Buffer(a.buffer_out)
+    }
+}
+
+impl Drop for Staging {
+    fn drop(&mut self) {
+        unsafe {
+            let mut d: sys::PJRT_AsyncHostToDeviceTransferManager_Destroy_Args = zeroed();
+            d.struct_size =
+                size_of::<sys::PJRT_AsyncHostToDeviceTransferManager_Destroy_Args>();
+            d.transfer_manager = self.manager;
+            (*self.api).PJRT_AsyncHostToDeviceTransferManager_Destroy.unwrap()(&mut d);
+        }
+    }
+}
+
+/// Which of the async host-to-device transfer manager's entry points the
+/// loaded plugin implements. A PJRT plugin may leave any of them null, and
+/// that manager is the only way through this API to allocate a device
+/// buffer before the transfer that fills it.
+pub unsafe fn async_h2d_entry_points() -> Vec<(&'static str, bool)> {
+    let api = shared_pjrt().api;
+    vec![
+        (
+            "PJRT_Client_CreateBuffersForAsyncHostToDevice",
+            (*api).PJRT_Client_CreateBuffersForAsyncHostToDevice.is_some(),
+        ),
+        (
+            "PJRT_AsyncHostToDeviceTransferManager_TransferData",
+            (*api).PJRT_AsyncHostToDeviceTransferManager_TransferData.is_some(),
+        ),
+        (
+            "PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer",
+            (*api).PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer.is_some(),
+        ),
+        (
+            "PJRT_AsyncHostToDeviceTransferManager_Destroy",
+            (*api).PJRT_AsyncHostToDeviceTransferManager_Destroy.is_some(),
+        ),
+        ("PJRT_Device_DefaultMemory", (*api).PJRT_Device_DefaultMemory.is_some()),
+    ]
 }
