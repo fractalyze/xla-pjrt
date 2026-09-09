@@ -55,6 +55,10 @@ fn staged_buffers_carry_their_bytes_into_an_execution() {
         let y = staging.retrieve(1);
         a.wait();
         b.wait();
+        // The bridge drops the manager as soon as it has the buffers, so
+        // the buffers have to outlive it. If PJRT freed their memory with
+        // the manager this is where it would show.
+        drop(staging);
 
         let out = session.run_buffers(&exe, &[&x, &y], 1);
         let got: Vec<f32> = out[0]
