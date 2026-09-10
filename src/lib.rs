@@ -100,6 +100,12 @@ impl Pjrt {
             nv.__bindgen_anon_1.bool_value = eager;
             named.push(nv);
         }
+        if let Some(threshold) = options.staging_threshold_bytes {
+            let mut nv = named_value(b"staging_threshold_bytes");
+            nv.type_ = sys::PJRT_NamedValue_kInt64;
+            nv.__bindgen_anon_1.int64_value = threshold;
+            named.push(nv);
+        }
         let mut a: sys::PJRT_Client_Create_Args = zeroed();
         a.struct_size = size_of::<sys::PJRT_Client_Create_Args>();
         a.create_options = named.as_ptr();
@@ -145,11 +151,22 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
 /// pays every module load on its critical path. The plugin must carry the
 /// option (fractalyze/xla#664); an older one rejects the unknown key and
 /// client creation fails, so leave it `None` against those.
+///
+/// `staging_threshold_bytes` is the size at or above which a host-to-device
+/// transfer is DMA'd straight out of the caller's pageable memory instead of
+/// being copied through the client's pinned staging pool. The plugin's
+/// default is 1 GiB, so a caller whose transfers are larger than that gets
+/// the pageable rate on exactly its largest copies; setting this above them
+/// buys the pinned rate at the cost of growing the pinned pool by about one
+/// transfer. The plugin must carry the option (fractalyze/xla#718); an older
+/// one rejects the unknown key and client creation fails, so leave it `None`
+/// against those.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SessionOptions {
     pub preallocate: Option<bool>,
     pub memory_fraction: Option<f32>,
     pub eager_load_executable_modules: Option<bool>,
+    pub staging_threshold_bytes: Option<i64>,
 }
 
 pub struct Client {
