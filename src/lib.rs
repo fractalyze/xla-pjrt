@@ -142,6 +142,28 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
         .0
 }
 
+/// What a client's device allocator holds and has held.
+///
+/// `PJRT_Device_MemoryStats`. Only `bytes_in_use` is required of a plugin;
+/// each of the rest arrives with a flag beside it, so an allocator that does
+/// not keep one leaves it `None` rather than reporting zero.
+///
+/// The pair worth reading together is `peak_bytes_in_use` against
+/// `peak_pool_bytes`: the first is the live bytes at the high-water mark, the
+/// second what the allocator held from the driver to place them in. Their
+/// difference is what an arena costs above its data, and it is a measurement
+/// on a run that finished rather than a bound from one that died.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MemoryStats {
+    pub bytes_in_use: i64,
+    pub peak_bytes_in_use: Option<i64>,
+    pub largest_alloc_size: Option<i64>,
+    pub bytes_limit: Option<i64>,
+    pub largest_free_block_bytes: Option<i64>,
+    pub pool_bytes: Option<i64>,
+    pub peak_pool_bytes: Option<i64>,
+}
+
 /// Which device allocator the GPU plugin builds for a client.
 ///
 /// The plugin parses the spelling and rejects anything else
@@ -279,6 +301,37 @@ impl Client {
         check(self.api, (*self.api).PJRT_Client_AddressableDevices.unwrap()(&mut a), "AddressableDevices");
         assert!(a.num_addressable_devices > 0, "no addressable devices");
         *a.addressable_devices
+    }
+
+    /// What the client's device allocator holds and has held, or `None` when
+    /// the plugin does not keep the statistics for this allocator kind (the
+    /// platform allocator has none to report, and the C API's answer there is
+    /// an error rather than zeros).
+    unsafe fn memory_stats(&self) -> Option<MemoryStats> {
+        let mut a: sys::PJRT_Device_MemoryStats_Args = zeroed();
+        a.struct_size = size_of::<sys::PJRT_Device_MemoryStats_Args>();
+        a.device = self.first_device();
+        let err = (*self.api).PJRT_Device_MemoryStats.unwrap()(&mut a);
+        if !err.is_null() {
+            let mut d: sys::PJRT_Error_Destroy_Args = zeroed();
+            d.struct_size = size_of::<sys::PJRT_Error_Destroy_Args>();
+            d.error = err;
+            (*self.api).PJRT_Error_Destroy.unwrap()(&mut d);
+            return None;
+        }
+        let set = |value: i64, is_set: bool| is_set.then_some(value);
+        Some(MemoryStats {
+            bytes_in_use: a.bytes_in_use,
+            peak_bytes_in_use: set(a.peak_bytes_in_use, a.peak_bytes_in_use_is_set),
+            largest_alloc_size: set(a.largest_alloc_size, a.largest_alloc_size_is_set),
+            bytes_limit: set(a.bytes_limit, a.bytes_limit_is_set),
+            largest_free_block_bytes: set(
+                a.largest_free_block_bytes,
+                a.largest_free_block_bytes_is_set,
+            ),
+            pool_bytes: set(a.pool_bytes, a.pool_bytes_is_set),
+            peak_pool_bytes: set(a.peak_pool_bytes, a.peak_pool_bytes_is_set),
+        })
     }
 
     unsafe fn await_event(&self, ev: *mut sys::PJRT_Event) {
@@ -588,6 +641,12 @@ impl Session {
     /// handle needed to release it belongs to this `Session` — a `Drop` impl
     /// would have to reach a pointer into the plugin that may already have
     /// unloaded.
+    /// What this session's device allocator holds and has held; `None` when
+    /// the plugin keeps no statistics for the kind it built.
+    pub unsafe fn memory_stats(&self) -> Option<MemoryStats> {
+        self.client.memory_stats()
+    }
+
     pub unsafe fn free_buffer(&self, buffer: Buffer) {
         self.client.destroy_buffer(buffer.0);
     }
