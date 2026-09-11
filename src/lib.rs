@@ -153,13 +153,20 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
 /// second what the allocator held from the driver to place them in. Their
 /// difference is what an arena costs above its data, and it is a measurement
 /// on a run that finished rather than a bound from one that died.
+///
+/// `largest_free_block_bytes` is deliberately not carried across. The C API
+/// has the field, but neither of the plugin's GPU allocators ever writes it,
+/// so it arrives as a confident zero whatever the heap looks like -- and a
+/// zero there reads as "no free block would fit", which is the conclusion
+/// someone reaching for the field is usually trying to reach. What does carry
+/// that evidence is `pool_bytes` against `bytes_in_use`: free bytes inside a
+/// pool that cannot take the next request are the difference between them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MemoryStats {
     pub bytes_in_use: i64,
     pub peak_bytes_in_use: Option<i64>,
     pub largest_alloc_size: Option<i64>,
     pub bytes_limit: Option<i64>,
-    pub largest_free_block_bytes: Option<i64>,
     pub pool_bytes: Option<i64>,
     pub peak_pool_bytes: Option<i64>,
 }
@@ -325,10 +332,6 @@ impl Client {
             peak_bytes_in_use: set(a.peak_bytes_in_use, a.peak_bytes_in_use_is_set),
             largest_alloc_size: set(a.largest_alloc_size, a.largest_alloc_size_is_set),
             bytes_limit: set(a.bytes_limit, a.bytes_limit_is_set),
-            largest_free_block_bytes: set(
-                a.largest_free_block_bytes,
-                a.largest_free_block_bytes_is_set,
-            ),
             pool_bytes: set(a.pool_bytes, a.pool_bytes_is_set),
             peak_pool_bytes: set(a.peak_pool_bytes, a.peak_pool_bytes_is_set),
         })
