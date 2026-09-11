@@ -100,6 +100,16 @@ impl Pjrt {
             nv.__bindgen_anon_1.bool_value = eager;
             named.push(nv);
         }
+        if let Some(kind) = options.allocator {
+            // The one string-valued option here: `value_size` counts the
+            // characters rather than standing at the scalar 1, and the
+            // spelling is `&'static str` so it outlives the call.
+            let mut nv = named_value(b"allocator");
+            nv.type_ = sys::PJRT_NamedValue_kString;
+            nv.__bindgen_anon_1.string_value = kind.as_str().as_ptr() as *const c_char;
+            nv.value_size = kind.as_str().len();
+            named.push(nv);
+        }
         if let Some(threshold) = options.staging_threshold_bytes {
             let mut nv = named_value(b"staging_threshold_bytes");
             nv.type_ = sys::PJRT_NamedValue_kInt64;
@@ -132,6 +142,46 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
         .0
 }
 
+/// Which device allocator the GPU plugin builds for a client.
+///
+/// The plugin parses the spelling and rejects anything else
+/// (`xla/pjrt/c/pjrt_c_api_gpu_internal.cc`), so the kinds are an enum here
+/// rather than a string the caller composes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AllocatorKind {
+    /// Whatever the plugin picks for the platform, which on CUDA is [`Bfc`].
+    ///
+    /// [`Bfc`]: AllocatorKind::Bfc
+    Default,
+    /// The platform's own allocator: one driver allocation per request, no
+    /// pool and no arena, so nothing is claimed up front.
+    Platform,
+    /// Best-fit with coalescing over one arena. Every allocation is placed in
+    /// that arena, so a large one needs a free block of its size.
+    Bfc,
+    /// `cudaMallocAsync` out of the device's default memory pool. The driver
+    /// maps the pool's pages behind a request, so an allocation needs
+    /// contiguous virtual addresses rather than a contiguous free block.
+    CudaAsync,
+    /// CUDA virtual memory management: virtual address space reserved up
+    /// front and mapped to physical pages as they are needed.
+    Vmm,
+}
+
+impl AllocatorKind {
+    /// The spelling the plugin parses. It rides as a counted string, so no
+    /// NUL terminator is needed.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AllocatorKind::Default => "default",
+            AllocatorKind::Platform => "platform",
+            AllocatorKind::Bfc => "bfc",
+            AllocatorKind::CudaAsync => "cuda_async",
+            AllocatorKind::Vmm => "vmm",
+        }
+    }
+}
+
 /// Client creation options.
 ///
 /// `preallocate: Some(false)` keeps the GPU plugin's allocator from claiming
@@ -152,6 +202,26 @@ unsafe fn shared_pjrt() -> &'static Pjrt {
 /// option (fractalyze/xla#664); an older one rejects the unknown key and
 /// client creation fails, so leave it `None` against those.
 ///
+/// `allocator` picks which device allocator the client builds; `None` leaves
+/// the plugin's default, which on CUDA is the BFC allocator. The kind changes
+/// what the two options above mean:
+///
+/// * Under BFC, `memory_fraction` is a ceiling as well as a claim — the
+///   client's arena is that share of the card and an allocation that does not
+///   fit a free block in it fails, however much of the card is free.
+/// * Under [`AllocatorKind::CudaAsync`], the client allocates from the
+///   device's *default* CUDA memory pool. `memory_fraction` of the card
+///   becomes the pool's release threshold, which `preallocate` claims once up
+///   front and the pool then holds rather than returning to the driver; it is
+///   not a ceiling, and the pool grows past it while the card has room. With
+///   `preallocate: Some(false)` the threshold is zero, so every free goes
+///   straight back to the driver and a co-tenant can take it.
+///
+/// The key itself is an upstream PJRT GPU create option rather than a
+/// fractalyze one, but a plugin still rejects a *kind* it cannot name, and
+/// [`AllocatorKind::Vmm`] is the newest of them; a client creation that fails
+/// on the kind says which spellings that plugin knows.
+///
 /// `staging_threshold_bytes` is the size at or above which a host-to-device
 /// transfer is DMA'd straight out of the caller's pageable memory instead of
 /// being copied through the client's pinned staging pool. The plugin's
@@ -167,6 +237,7 @@ pub struct SessionOptions {
     pub memory_fraction: Option<f32>,
     pub eager_load_executable_modules: Option<bool>,
     pub staging_threshold_bytes: Option<i64>,
+    pub allocator: Option<AllocatorKind>,
 }
 
 pub struct Client {

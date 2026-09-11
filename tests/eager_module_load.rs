@@ -50,6 +50,7 @@ fn a_deserialized_executable_runs_under_eager_module_loads() {
             memory_fraction: None,
             eager_load_executable_modules: Some(true),
             staging_threshold_bytes: None,
+            allocator: None,
         });
 
         // The path the option changes: the modules load inside this call

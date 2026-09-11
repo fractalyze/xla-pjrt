@@ -74,6 +74,7 @@ fn a_transfer_past_the_default_threshold_survives_staging() {
             // Above the transfer below, so it is staged rather than DMA'd
             // from pageable memory.
             staging_threshold_bytes: Some(2 << 30),
+            allocator: None,
         });
 
         let compiled = session.compile(DOUBLE.as_bytes());
